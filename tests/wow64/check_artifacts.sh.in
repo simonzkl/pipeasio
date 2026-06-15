@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pipeasio32="@PIPEASIO32_DLL@"
+unixlib64="@PIPEASIO32_UNIX@"
+file_cmd="@FILE_EXECUTABLE@"
+objdump32="@I686_W64_MINGW_OBJDUMP@"
+nm_cmd="@NM_EXECUTABLE@"
+
+fail() {
+    printf 'not ok - %s\n' "$*" >&2
+    exit 1
+}
+
+[ -f "$pipeasio32" ] || fail "missing pipeasio32.dll at $pipeasio32"
+[ -f "$unixlib64" ] || fail "missing pipeasio32.so at $unixlib64"
+
+"$file_cmd" "$pipeasio32" | tee pipeasio32.file
+"$file_cmd" "$unixlib64" | tee pipeasio32-unix.file
+
+grep -q 'PE32 executable' pipeasio32.file \
+    || fail "pipeasio32.dll is not a PE32 artifact"
+grep -q 'PE32 executable for WINE' pipeasio32.file \
+    || fail "pipeasio32.dll is not marked as a Wine builtin"
+grep -q 'Intel i386' pipeasio32.file \
+    || fail "pipeasio32.dll is not i386"
+grep -Eq 'ELF 64-bit.*x86-64|ELF 64-bit.*x86_64' pipeasio32-unix.file \
+    || fail "pipeasio32.so is not an x86_64 ELF artifact"
+
+"$objdump32" -p "$pipeasio32" > pipeasio32.objdump
+"$nm_cmd" -D "$unixlib64" > pipeasio32-unix.nm
+"$nm_cmd" "$unixlib64" > pipeasio32-unix.all-nm
+
+for export in \
+    DllCanUnloadNow \
+    DllGetClassObject \
+    DllRegisterServer \
+    DllUnregisterServer
+do
+    grep -Eq "[[:space:]]${export}$" pipeasio32.objdump \
+        || fail "pipeasio32.dll missing undecorated export ${export}"
+done
+
+for export in \
+    __wine_spec_nt_header \
+    __wine_unix_call_funcs \
+    __wine_unix_call_wow64_funcs
+do
+    grep -Eq "[[:space:]]${export}$" pipeasio32-unix.nm \
+        || fail "pipeasio32.so missing Wine unixlib export ${export}"
+done
+
+for forbidden in pipewire jack asound
+do
+    if grep -Eiq "$forbidden" pipeasio32.objdump; then
+        fail "WoW64 PE artifact unexpectedly references ${forbidden}"
+    fi
+done
+
+for forbidden in PipeASIOCreateInstance
+do
+    if grep -Eq "[[:space:]]${forbidden}$" pipeasio32-unix.all-nm; then
+        fail "WoW64 unixlib unexpectedly contains old COM backend symbol ${forbidden}"
+    fi
+done
+
+[ ! -e "@CMAKE_BINARY_DIR@/pipeasio64-helper.exe" ] \
+    || fail "obsolete helper artifact was built"
+
+printf 'ok - WoW64 artifact contract holds\n'

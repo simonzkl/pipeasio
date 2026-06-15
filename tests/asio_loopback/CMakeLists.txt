@@ -4,6 +4,7 @@
 # channel mapping, and measured vs reported round-trip latency.
 
 find_program(WINEGCC winegcc REQUIRED)
+find_program(I686_W64_MINGW_GCC i686-w64-mingw32-gcc)
 
 set(LOOP_SRC  "${CMAKE_CURRENT_SOURCE_DIR}/asio_loopback.c")
 set(LOOP_OUT  "${CMAKE_CURRENT_BINARY_DIR}/asio_loopback.exe.so")
@@ -21,6 +22,22 @@ add_custom_command(
 )
 
 add_custom_target(asio_loopback ALL DEPENDS "${LOOP_OUT}")
+
+if(I686_W64_MINGW_GCC)
+    set(LOOP32_OUT "${CMAKE_CURRENT_BINARY_DIR}/asio_loopback32.exe")
+    add_custom_command(
+        OUTPUT  "${LOOP32_OUT}"
+        COMMAND "${I686_W64_MINGW_GCC}" -mconsole
+                         -O0 -g -Wall -Wextra
+                         "${LOOP_SRC}"
+                         -lole32
+                         -o "${LOOP32_OUT}"
+        DEPENDS "${LOOP_SRC}"
+        COMMENT "mingw asio_loopback32 (PE32)"
+        VERBATIM
+    )
+    add_custom_target(asio_loopback32 ALL DEPENDS "${LOOP32_OUT}")
+endif()
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/run.sh"

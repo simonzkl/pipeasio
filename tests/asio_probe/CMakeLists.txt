@@ -2,6 +2,7 @@
 # interface so we don't need FL Studio / Proton / Faugus to iterate.
 
 find_program(WINEGCC winegcc REQUIRED)
+find_program(I686_W64_MINGW_GCC i686-w64-mingw32-gcc)
 
 set(PROBE_SRC  "${CMAKE_CURRENT_SOURCE_DIR}/asio_probe.c")
 set(PROBE_OUT  "${CMAKE_CURRENT_BINARY_DIR}/asio_probe.exe.so")
@@ -20,6 +21,22 @@ add_custom_command(
 )
 
 add_custom_target(asio_probe ALL DEPENDS "${PROBE_OUT}")
+
+if(I686_W64_MINGW_GCC)
+    set(PROBE32_OUT "${CMAKE_CURRENT_BINARY_DIR}/asio_probe32.exe")
+    add_custom_command(
+        OUTPUT  "${PROBE32_OUT}"
+        COMMAND "${I686_W64_MINGW_GCC}" -mconsole
+                         -O0 -g -Wall -Wextra
+                         "${PROBE_SRC}"
+                         -lole32
+                         -o "${PROBE32_OUT}"
+        DEPENDS "${PROBE_SRC}"
+        COMMENT "mingw asio_probe32 (PE32)"
+        VERBATIM
+    )
+    add_custom_target(asio_probe32 ALL DEPENDS "${PROBE32_OUT}")
+endif()
 
 # Copy the runner scripts next to the binary so they ship in build/tests.
 configure_file(

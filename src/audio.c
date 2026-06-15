@@ -1,9 +1,11 @@
 /*
  * audio.c — native libpipewire-0.3 backend for PipeASIO.
  *
- * Stands up a pw_thread_loop and context, and overrides spa_thread_utils
- * on the data loop so PipeWire's RT thread is a Win32 CreateThread'd Wine
- * thread (proper TEB, able to call back into the ASIO host's COM methods).
+ * Stands up a pw_thread_loop and context. Native Wine DLL builds override
+ * spa_thread_utils on the data loop so PipeWire's RT thread is a Win32
+ * CreateThread'd Wine thread (proper TEB, able to call back into the ASIO
+ * host's COM methods). WoW64 unixlib builds use PipeWire's default data-loop
+ * thread and bridge callbacks onto a PE thread.
  * Creates a duplex pw_filter with MAP_BUFFERS ports and walks the registry
  * for port discovery and audio_connect.
  *
@@ -29,9 +31,11 @@
 #include "audio.h"
 #include "pipeasio_offsets.h"
 
+#ifndef PIPEASIO_AUDIO_UNIXLIB
 #define WIN32_LEAN_AND_MEAN
 #include "windef.h"
 #include "winbase.h"
+#endif
 #include "wine/debug.h"
 
 #include <stdlib.h> /* getenv for PIPEASIO_DEBUG */
@@ -96,6 +100,16 @@ pipeasio_log_on(void)
 
 WINE_DEFAULT_DEBUG_CHANNEL(asio);
 
+static unsigned long
+audio_current_thread_id(void)
+{
+#ifdef PIPEASIO_AUDIO_UNIXLIB
+    return (unsigned long)(uintptr_t)pthread_self();
+#else
+    return (unsigned long)GetCurrentThreadId();
+#endif
+}
+
 /* Startup defaults.  The buffer size is overridden by the ASIO host's
  * negotiated size in CreateBuffers; the sample rate is overridden by
  * audio_on_io_changed when the graph runs at a different rate. */
@@ -106,6 +120,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #define AUDIO_RT_PRIO_MIN 1
 #define AUDIO_RT_PRIO_MAX 80
 
+#ifndef PIPEASIO_AUDIO_UNIXLIB
 /* ----------------------------------------------------------------------
  * Wine RT thread bridge — install custom spa_thread_utils on the data
  * loop so the audio thread is a CreateThread'd Wine thread, capable of
@@ -133,7 +148,7 @@ audio_rt_trampoline(LPVOID raw)
     s->ptid = pthread_self();
     atomic_store_explicit(&s->ready, true, memory_order_release);
 
-    TRACE("rt thread entry: tid=%lx\n", (unsigned long)GetCurrentThreadId());
+    TRACE("rt thread entry: tid=%lx\n", audio_current_thread_id());
 
     /* Flush subnormal floats to zero on this RT thread: the ASIO host's DSP
      * runs here, and denormals can stall the CPU for hundreds of cycles. */
@@ -248,6 +263,7 @@ static const struct spa_thread_utils_methods audio_rt_methods = {
     SPA_VERSION_THREAD_UTILS_METHODS,   .create = audio_rt_create,      .join = audio_rt_join,
     .get_rt_range = audio_rt_get_range, .acquire_rt = audio_rt_acquire, .drop_rt = audio_rt_drop,
 };
+#endif /* !PIPEASIO_AUDIO_UNIXLIB */
 
 /* ----------------------------------------------------------------------
  * Opaque types backing audio.h
@@ -267,8 +283,10 @@ struct audio_client
     struct pw_core        *core;
     struct pw_data_loop   *data_loop;
 
+#ifndef PIPEASIO_AUDIO_UNIXLIB
     struct audio_rt_state   rt;
     struct spa_thread_utils rt_iface;
+#endif
 
     audio_process_cb     process_cb;
     void                *process_cb_arg;
@@ -398,6 +416,18 @@ static void audio_teardown_filter(audio_client_t *c);
 static void audio_sync(audio_client_t *c);
 static void audio_adopt_own_ports(audio_client_t *c);
 
+static void
+audio_filter_loop_lock(audio_client_t *c)
+{
+    pw_loop_lock(pw_data_loop_get_loop(c->data_loop));
+}
+
+static void
+audio_filter_loop_unlock(audio_client_t *c)
+{
+    pw_loop_unlock(pw_data_loop_get_loop(c->data_loop));
+}
+
 /* ----------------------------------------------------------------------
  * Lifecycle
  * ---------------------------------------------------------------------- */
@@ -409,6 +439,7 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
     if (status)
         *status = 0;
 
+    TRACE("audio_open: begin client_name=%s\n", client_name ? client_name : "(null)");
     audio_client_t *c = calloc(1, sizeof(*c));
     if (!c)
     {
@@ -422,10 +453,14 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
     c->sample_rate = AUDIO_DEFAULT_SAMPLE_RATE;
     c->buffer_size = AUDIO_DEFAULT_BUFFER_SIZE;
     c->our_node_id = SPA_ID_INVALID;
+#ifndef PIPEASIO_AUDIO_UNIXLIB
     atomic_init(&c->rt.ready, false);
+#endif
 
+    TRACE("audio_open: pw_init\n");
     pw_init(NULL, NULL);
 
+    TRACE("audio_open: pw_thread_loop_new\n");
     c->loop = pw_thread_loop_new(c->name, NULL);
     if (!c->loop)
     {
@@ -433,6 +468,7 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
         goto fail_alloc;
     }
 
+    TRACE("audio_open: pw_context_new\n");
     c->ctx = pw_context_new(pw_thread_loop_get_loop(c->loop), NULL, 0);
     if (!c->ctx)
     {
@@ -440,11 +476,12 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
         goto fail_loop;
     }
 
+    c->data_loop = pw_context_get_data_loop(c->ctx);
+#ifndef PIPEASIO_AUDIO_UNIXLIB
     /* Wire our Wine-thread spa_thread_utils so PipeWire spawns its RT
      * thread via CreateThread (giving it a Wine TEB) — critical because
-     * any callback that bridges into PE code via Wine's loader will
-     * otherwise execute on a Wine-managed bridge stack with a
-     * mismatched __stack_chk_guard, which smashes the canary on return.
+     * native Wine DLL builds call the ASIO host callback directly from
+     * the process thread.
      *
      * Set the override on the context's data loop only (like pwasio): the
      * data loop owns the RT process() thread, which must be a Win32 thread
@@ -453,7 +490,6 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
      * bridging), so it needs no TEB and no Win32 thread. */
     c->rt_iface.iface = SPA_INTERFACE_INIT(SPA_TYPE_INTERFACE_ThreadUtils, SPA_VERSION_THREAD_UTILS,
                                            &audio_rt_methods, &c->rt);
-    c->data_loop      = pw_context_get_data_loop(c->ctx);
     pw_data_loop_set_thread_utils(c->data_loop, &c->rt_iface);
 
     /* pw_context_new already started the data loop with the DEFAULT
@@ -464,8 +500,13 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
      * the override is dead: the process() callback runs on a foreign
      * pthread and the ASIO host's COM bufferSwitch corrupts memory.
      * (Mirrors pwasio's stop/restart sequence.) */
+    TRACE("audio_open: install data-loop thread utils\n");
     pw_data_loop_stop(c->data_loop);
+#else
+    TRACE("audio_open: using PipeWire default data-loop thread\n");
+#endif
 
+    TRACE("audio_open: pw_thread_loop_start\n");
     if (pw_thread_loop_start(c->loop) < 0)
     {
         ERR("pw_thread_loop_start failed\n");
@@ -473,6 +514,7 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
     }
 
     pw_thread_loop_lock(c->loop);
+    TRACE("audio_open: pw_context_connect\n");
     c->core = pw_context_connect(c->ctx, NULL, 0);
     if (!c->core)
     {
@@ -491,10 +533,12 @@ audio_open(const char *client_name, uint32_t options, uint32_t *status)
         pw_registry_add_listener(c->registry, &c->registry_listener, &audio_registry_events, c);
 
     pw_thread_loop_unlock(c->loop);
+    TRACE("audio_open: first sync\n");
     audio_sync(c);
     /* A second sync drains the "default" metadata's initial property burst:
      * the object is bound during the first sync's global emission, so its
      * default.audio.sink/source values only land on the next round-trip. */
+    TRACE("audio_open: second sync\n");
     audio_sync(c);
 
     TRACE("audio_open(%s) -> %p [build " PIPEASIO_BUILD_TAG "] "
@@ -606,10 +650,10 @@ audio_teardown_filter(audio_client_t *c)
     }
     if (c->filter)
     {
-        pw_thread_loop_lock(c->loop);
+        audio_filter_loop_lock(c);
         pw_filter_destroy(c->filter);
         c->filter = NULL;
-        pw_thread_loop_unlock(c->loop);
+        audio_filter_loop_unlock(c);
     }
     for (uint32_t i = 0; i < c->n_ports; i++)
     {
@@ -661,13 +705,13 @@ audio_activate(audio_client_t *c)
           (int)c->follow_device, (unsigned)bsize_samples, (unsigned)c->forced_rate,
           (unsigned)bsize_samples, (unsigned)c->sample_rate);
 
-    pw_thread_loop_lock(c->loop);
+    audio_filter_loop_lock(c);
 
     c->filter = pw_filter_new_simple(pw_data_loop_get_loop(c->data_loop), c->name, filter_props,
                                      &audio_filter_events, c);
     if (!c->filter)
     {
-        pw_thread_loop_unlock(c->loop);
+        audio_filter_loop_unlock(c);
         ERR("pw_filter_new_simple failed\n");
         goto fail;
     }
@@ -684,7 +728,7 @@ audio_activate(audio_client_t *c)
         struct pw_properties *pp = pw_properties_new(NULL, NULL);
         if (!pp)
         {
-            pw_thread_loop_unlock(c->loop);
+            audio_filter_loop_unlock(c);
             ERR("pw_properties_new (port %u) failed\n", i);
             goto fail;
         }
@@ -707,7 +751,7 @@ audio_activate(audio_client_t *c)
                                      sizeof(audio_port_ref_t), pp, params, SPA_N_ELEMENTS(params));
         if (!p->pw_filter_port)
         {
-            pw_thread_loop_unlock(c->loop);
+            audio_filter_loop_unlock(c);
             ERR("pw_filter_add_port failed for port %u (%s)\n", i, p->name);
             goto fail;
         }
@@ -716,20 +760,20 @@ audio_activate(audio_client_t *c)
 
     if (pw_filter_connect(c->filter, PW_FILTER_FLAG_NONE, NULL, 0) < 0)
     {
-        pw_thread_loop_unlock(c->loop);
+        audio_filter_loop_unlock(c);
         ERR("pw_filter_connect failed\n");
         goto fail;
     }
 
-    pw_thread_loop_unlock(c->loop);
+    audio_filter_loop_unlock(c);
 
     /* Start the data loop now — AFTER add_port/connect.  Those run in the
      * thread-loop context and fail "wrong context: not in loop" if the
      * filter's (data) loop is already running, so it stayed stopped since
-     * audio_open.  Starting it here spawns the RT thread via
-     * audio_rt_create (Wine TEB) and lets the node bind below and schedule
-     * process() on that bridged thread.  (Mirrors pwasio: filter set up
-     * with the data loop stopped, started in Start().) */
+     * audio_open.  Native builds spawn the RT thread via audio_rt_create
+     * (Wine TEB); WoW64 unixlib builds use PipeWire's default data-loop
+     * thread and bridge PE callbacks elsewhere.  (Mirrors pwasio: filter
+     * set up with the data loop stopped, started in Start().) */
     pw_thread_loop_lock(c->loop);
     if (pw_data_loop_start(c->data_loop) < 0)
     {
@@ -1368,10 +1412,10 @@ audio_free_ports(const char **ports)
 }
 
 /* ----------------------------------------------------------------------
- * Filter event callbacks — fire on the PipeWire data thread.  Because the
- * data thread was spawned by our audio_rt_create, it is a real Wine
- * thread; calling back into asio.c's process_cb (which then calls the
- * host's ASIO COM bufferSwitch) is safe.
+ * Filter event callbacks — fire on the PipeWire data thread.  Native builds
+ * run this on the Wine thread from audio_rt_create, so direct host callbacks
+ * are safe.  WoW64 unixlib builds keep this thread native and bridge callbacks
+ * to a PE thread in the frontend.
  * ---------------------------------------------------------------------- */
 
 static void
@@ -1475,7 +1519,7 @@ audio_on_process(void *userdata, struct spa_io_position *position)
         if (++cycle_count <= 8 || (cycle_count < 100 && cycle_count % 10 == 0)
             || (cycle_count >= 100 && cycle_count % 100 == 0))
             TRACE("process: cycle=%lu tid=%lx buffer_size=%u quantum=%u rate=%u/%u\n",
-                  (unsigned long)cycle_count, (unsigned long)GetCurrentThreadId(),
+                  (unsigned long)cycle_count, audio_current_thread_id(),
                   (unsigned)c->buffer_size, (unsigned)quantum,
                   position ? (unsigned)position->clock.rate.num : 0u,
                   position ? (unsigned)position->clock.rate.denom : 0u);

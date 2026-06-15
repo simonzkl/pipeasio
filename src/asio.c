@@ -1783,6 +1783,8 @@ configure_driver(IPipeASIOImpl *This)
         if (errno != ERANGE)
             This->pipeasio_sample_rate = result;
     }
+    if (This->pipeasio_sample_rate < 0)
+        This->pipeasio_sample_rate = PIPEASIO_DEFAULT_SAMPLE_RATE;
     n = GetEnvironmentVariableA("PIPEASIO_OUTPUT_DEVICE", dev_env, sizeof dev_env);
     if (n > 0 && n < sizeof dev_env)
         lstrcpynA(This->pipeasio_output_device, dev_env, sizeof This->pipeasio_output_device);
