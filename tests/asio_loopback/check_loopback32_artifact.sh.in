@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+loopback32="@LOOP32_OUT@"
+file_cmd="@FILE_EXECUTABLE@"
+
+fail() {
+    printf 'not ok - %s\n' "$*" >&2
+    exit 1
+}
+
+[ -f "$loopback32" ] || fail "missing asio_loopback32.exe at $loopback32"
+
+"$file_cmd" "$loopback32" | tee asio_loopback32.file
+
+grep -q 'PE32 executable' asio_loopback32.file \
+    || fail "asio_loopback32.exe is not a PE32 artifact"
+grep -q 'Intel i386' asio_loopback32.file \
+    || fail "asio_loopback32.exe is not i386"
+
+printf 'ok - asio_loopback32 artifact contract holds\n'

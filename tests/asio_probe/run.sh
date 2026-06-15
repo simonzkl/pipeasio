@@ -10,11 +10,12 @@
 #   WINEDEBUG      : forwarded to Wine (default -all,+pipeasio,err+all)
 #   PROBE_PREFIX   : wineprefix to use (default /tmp/pipeasio-probe)
 #   PIPEASIO_ROOT  : install root for the .so (default $HOME/.local)
+#   ASIO_PROBE_EXE : probe binary (default built 64-bit Wine PE)
 
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-probe="${here}/asio_probe.exe.so"
+probe="${ASIO_PROBE_EXE:-${here}/asio_probe.exe.so}"
 [[ -x "$probe" ]] || { echo "asio_probe not built: $probe"; exit 1; }
 
 seconds="${1:-5}"
@@ -75,6 +76,12 @@ if ! wine reg query 'HKCU\Software\ASIO\PipeASIO' >/dev/null 2>&1; then
         || { echo "[run] pipeasio-register failed"; exit 1; }
 fi
 
+probe_cmd=(wine "$probe")
+if [[ "$probe" == *.exe && "$probe" != *.exe.so ]]; then
+    probe_win="$(winepath -w "$probe")"
+    probe_cmd=(wine cmd /c "$probe_win")
+fi
+
 # Suppress audible feedback during testing: setting "Connect to hardware" to 0
 # tells PipeASIO not to autoconnect inputs/outputs to default source/sink, so
 # the probe loads with isolated ports.  qpwgraph can still be used to wire
@@ -95,4 +102,4 @@ echo "[run] WINEDEBUG: $WINEDEBUG"
 echo "[run] starting probe (${seconds}s)..."
 echo "---"
 
-exec wine "$probe" "$seconds"
+exec "${probe_cmd[@]}" "$seconds"

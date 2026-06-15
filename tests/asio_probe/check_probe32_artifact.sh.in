@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+probe32="@PROBE32_OUT@"
+file_cmd="@FILE_EXECUTABLE@"
+
+fail() {
+    printf 'not ok - %s\n' "$*" >&2
+    exit 1
+}
+
+[ -f "$probe32" ] || fail "missing asio_probe32.exe at $probe32"
+
+"$file_cmd" "$probe32" | tee asio_probe32.file
+
+grep -q 'PE32 executable' asio_probe32.file \
+    || fail "asio_probe32.exe is not a PE32 artifact"
+grep -q 'Intel i386' asio_probe32.file \
+    || fail "asio_probe32.exe is not i386"
+
+printf 'ok - asio_probe32 artifact contract holds\n'

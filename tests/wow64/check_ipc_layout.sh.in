@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+src="@CMAKE_CURRENT_SOURCE_DIR@/ipc_layout.c"
+include_dir="@CMAKE_SOURCE_DIR@/src/wow64"
+gcc32="@I686_W64_MINGW_GCC@"
+gcc64="@X86_64_W64_MINGW_GCC@"
+
+"$gcc32" -std=c11 -Wall -Wextra -Werror \
+    -I "$include_dir" \
+    -DEXPECTED_POINTER_SIZE=4 \
+    -c "$src" \
+    -o ipc_layout.i386.o
+
+"$gcc64" -std=c11 -Wall -Wextra -Werror \
+    -I "$include_dir" \
+    -DEXPECTED_POINTER_SIZE=8 \
+    -c "$src" \
+    -o ipc_layout.x86_64.o
+
+printf 'ok - WoW64 IPC layout is stable across i386 and x86_64\n'

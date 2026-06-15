@@ -75,39 +75,47 @@ typedef struct TimeInformation {
     char      _4[64];
 } TimeInformation;
 
+#if defined(__i386__)
+#define ASIO_THISCALL __attribute__((thiscall))
+#define ASIO_CALLBACK
+#else
+#define ASIO_THISCALL CALLBACK
+#define ASIO_CALLBACK CALLBACK
+#endif
+
 typedef struct Callbacks {
-    void (CALLBACK *swapBuffers)               (LONG, LONG);
-    void (CALLBACK *sampleRateChanged)         (double);
-    LONG (CALLBACK *sendNotification)          (LONG, LONG, void *, double *);
-    void *(CALLBACK *swapBuffersWithTimeInfo)  (TimeInformation *, LONG, LONG);
+    void (ASIO_CALLBACK *swapBuffers)               (LONG, LONG);
+    void (ASIO_CALLBACK *sampleRateChanged)         (double);
+    LONG (ASIO_CALLBACK *sendNotification)          (LONG, LONG, void *, double *);
+    void *(ASIO_CALLBACK *swapBuffersWithTimeInfo)  (TimeInformation *, LONG, LONG);
 } Callbacks;
 
 typedef struct IPipeASIO IPipeASIO;
 typedef struct IPipeASIOVtbl {
-    HRESULT (CALLBACK *QueryInterface)     (IPipeASIO *, REFIID, void **);
-    ULONG   (CALLBACK *AddRef)             (IPipeASIO *);
-    ULONG   (CALLBACK *Release)            (IPipeASIO *);
-    LONG    (CALLBACK *Init)               (IPipeASIO *, void *);
-    void    (CALLBACK *GetDriverName)      (IPipeASIO *, char *);
-    LONG    (CALLBACK *GetDriverVersion)   (IPipeASIO *);
-    void    (CALLBACK *GetErrorMessage)    (IPipeASIO *, char *);
-    LONG    (CALLBACK *Start)              (IPipeASIO *);
-    LONG    (CALLBACK *Stop)               (IPipeASIO *);
-    LONG    (CALLBACK *GetChannels)        (IPipeASIO *, LONG *, LONG *);
-    LONG    (CALLBACK *GetLatencies)       (IPipeASIO *, LONG *, LONG *);
-    LONG    (CALLBACK *GetBufferSize)      (IPipeASIO *, LONG *, LONG *, LONG *, LONG *);
-    LONG    (CALLBACK *CanSampleRate)      (IPipeASIO *, double);
-    LONG    (CALLBACK *GetSampleRate)      (IPipeASIO *, double *);
-    LONG    (CALLBACK *SetSampleRate)      (IPipeASIO *, double);
-    LONG    (CALLBACK *GetClockSources)    (IPipeASIO *, void *, LONG *);
-    LONG    (CALLBACK *SetClockSource)     (IPipeASIO *, LONG);
-    LONG    (CALLBACK *GetSamplePosition)  (IPipeASIO *, w_int64_t *, w_int64_t *);
-    LONG    (CALLBACK *GetChannelInfo)     (IPipeASIO *, ChannelInformation *);
-    LONG    (CALLBACK *CreateBuffers)      (IPipeASIO *, BufferInformation *, LONG, LONG, Callbacks *);
-    LONG    (CALLBACK *DisposeBuffers)     (IPipeASIO *);
-    LONG    (CALLBACK *ControlPanel)       (IPipeASIO *);
-    LONG    (CALLBACK *Future)             (IPipeASIO *, LONG, void *);
-    LONG    (CALLBACK *OutputReady)        (IPipeASIO *);
+    HRESULT (STDMETHODCALLTYPE *QueryInterface) (IPipeASIO *, REFIID, void **);
+    ULONG   (STDMETHODCALLTYPE *AddRef)         (IPipeASIO *);
+    ULONG   (STDMETHODCALLTYPE *Release)        (IPipeASIO *);
+    LONG    (ASIO_THISCALL *Init)               (IPipeASIO *, void *);
+    void    (ASIO_THISCALL *GetDriverName)      (IPipeASIO *, char *);
+    LONG    (ASIO_THISCALL *GetDriverVersion)   (IPipeASIO *);
+    void    (ASIO_THISCALL *GetErrorMessage)    (IPipeASIO *, char *);
+    LONG    (ASIO_THISCALL *Start)              (IPipeASIO *);
+    LONG    (ASIO_THISCALL *Stop)               (IPipeASIO *);
+    LONG    (ASIO_THISCALL *GetChannels)        (IPipeASIO *, LONG *, LONG *);
+    LONG    (ASIO_THISCALL *GetLatencies)       (IPipeASIO *, LONG *, LONG *);
+    LONG    (ASIO_THISCALL *GetBufferSize)      (IPipeASIO *, LONG *, LONG *, LONG *, LONG *);
+    LONG    (ASIO_THISCALL *CanSampleRate)      (IPipeASIO *, double);
+    LONG    (ASIO_THISCALL *GetSampleRate)      (IPipeASIO *, double *);
+    LONG    (ASIO_THISCALL *SetSampleRate)      (IPipeASIO *, double);
+    LONG    (ASIO_THISCALL *GetClockSources)    (IPipeASIO *, void *, LONG *);
+    LONG    (ASIO_THISCALL *SetClockSource)     (IPipeASIO *, LONG);
+    LONG    (ASIO_THISCALL *GetSamplePosition)  (IPipeASIO *, w_int64_t *, w_int64_t *);
+    LONG    (ASIO_THISCALL *GetChannelInfo)     (IPipeASIO *, ChannelInformation *);
+    LONG    (ASIO_THISCALL *CreateBuffers)      (IPipeASIO *, BufferInformation *, LONG, LONG, Callbacks *);
+    LONG    (ASIO_THISCALL *DisposeBuffers)     (IPipeASIO *);
+    LONG    (ASIO_THISCALL *ControlPanel)       (IPipeASIO *);
+    LONG    (ASIO_THISCALL *Future)             (IPipeASIO *, LONG, void *);
+    LONG    (ASIO_THISCALL *OutputReady)        (IPipeASIO *);
 } IPipeASIOVtbl;
 struct IPipeASIO { const IPipeASIOVtbl *lpVtbl; };
 
@@ -237,25 +245,25 @@ static void process_half(LONG idx)
     g_cycles++;
 }
 
-static void CALLBACK cb_swapBuffers(LONG idx, LONG direct)
+static void ASIO_CALLBACK cb_swapBuffers(LONG idx, LONG direct)
 {
     (void)direct;
     process_half(idx);
 }
-static void CALLBACK cb_sampleRateChanged(double rate)
+static void ASIO_CALLBACK cb_sampleRateChanged(double rate)
 {
     fprintf(stderr, "[loop] sampleRateChanged(%f)\n", rate);
 }
-static LONG CALLBACK cb_sendNotification(LONG selector, LONG value,
-                                         void *msg, double *opt)
+static LONG ASIO_CALLBACK cb_sendNotification(LONG selector, LONG value,
+                                              void *msg, double *opt)
 {
     (void)value; (void)msg; (void)opt;
     if (selector == 1 || selector == 2) return 1;
     if (selector == 7 /* kAsioSupportsTimeInfo */) return 1;
     return 0;
 }
-static void *CALLBACK cb_swapBuffersWithTimeInfo(TimeInformation *t,
-                                                 LONG idx, LONG direct)
+static void *ASIO_CALLBACK cb_swapBuffersWithTimeInfo(TimeInformation *t,
+                                                      LONG idx, LONG direct)
 {
     (void)t; (void)direct;
     process_half(idx);

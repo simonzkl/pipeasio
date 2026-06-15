@@ -37,6 +37,54 @@ add_wine_dll(
 
 include(GNUInstallDirs)
 
+option(BUILD_WOW64_32 "Build the experimental WoW64 32-bit PE front end" ON)
+if(BUILD_WOW64_32)
+    find_program(I686_W64_MINGW_GCC i686-w64-mingw32-gcc)
+    find_program(X86_64_W64_MINGW_GCC x86_64-w64-mingw32-gcc)
+    if(I686_W64_MINGW_GCC AND X86_64_W64_MINGW_GCC)
+        set(PIPEASIO32_DLL "${CMAKE_BINARY_DIR}/pipeasio32.dll")
+        set(PIPEASIO64_HELPER "${CMAKE_BINARY_DIR}/pipeasio64-helper.exe")
+
+        add_custom_command(
+            OUTPUT  "${PIPEASIO32_DLL}"
+            COMMAND "${I686_W64_MINGW_GCC}" -shared
+                    "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio32_bridge.c"
+                    "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio32.def"
+                    -O2 -Wall -Wextra
+                    -o "${PIPEASIO32_DLL}"
+                    -lole32 -luuid
+            DEPENDS "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio32_bridge.c"
+                    "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio32.def"
+                    "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio_wow64_ipc.h"
+            VERBATIM
+            COMMENT "mingw pipeasio32.dll (WoW64 PE front end)")
+
+        add_custom_command(
+            OUTPUT  "${PIPEASIO64_HELPER}"
+            COMMAND "${X86_64_W64_MINGW_GCC}" -static -static-libgcc
+                    "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio64_metadata_helper.c"
+                    -O2 -Wall -Wextra
+                    -mwindows
+                    -o "${PIPEASIO64_HELPER}"
+                    -lole32 -luuid
+            DEPENDS "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio64_metadata_helper.c"
+                    "${CMAKE_SOURCE_DIR}/src/wow64/pipeasio_wow64_ipc.h"
+            VERBATIM
+            COMMENT "mingw pipeasio64-helper.exe (WoW64 metadata helper)")
+
+        add_custom_target(pipeasio32 ALL DEPENDS "${PIPEASIO32_DLL}")
+        add_custom_target(pipeasio64-helper ALL DEPENDS "${PIPEASIO64_HELPER}")
+
+        install(FILES "${PIPEASIO32_DLL}"
+                DESTINATION lib/wine/i386-windows)
+        install(FILES "${PIPEASIO64_HELPER}"
+                DESTINATION lib/wine/x86_64-windows)
+    else()
+        message(WARNING "mingw-w64 i686/x86_64 compilers not found - skipping "
+                        "experimental WoW64 32-bit front end.")
+    endif()
+endif()
+
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/pipeasio-register
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 
@@ -72,6 +120,7 @@ if(BUILD_TESTS)
     add_subdirectory(tests/asio_loopback)
     add_subdirectory(tests/unit)
     add_subdirectory(tests/pw_probe)
+    add_subdirectory(tests/wow64)
     if(BUILD_SETTINGS_PANEL AND Qt6_FOUND)
         add_subdirectory(tests/gui)
     endif()

@@ -46,8 +46,10 @@ fi
 
 # Stage the PE fake into the prefix's system32 so COM registration's
 # LoadLibrary resolves pipeasio64.dll by name.
-cp -v "${prefix}/x86_64-windows/pipeasio64.dll" \
-      "${WINEPREFIX}/drive_c/windows/system32/" || exit $?
+mkdir -p "${WINEPREFIX}/drive_c/windows/system32" \
+         "${WINEPREFIX}/drive_c/windows/syswow64" || exit $?
+cp -v --no-preserve=mode "${prefix}/x86_64-windows/pipeasio64.dll" \
+                         "${WINEPREFIX}/drive_c/windows/system32/" || exit $?
 
 # WINEDLLPATH lets Wine (host wine for this registration; Proton's wine at
 # runtime — both need it for user-local installs) find the ELF .so half
@@ -55,6 +57,33 @@ cp -v "${prefix}/x86_64-windows/pipeasio64.dll" \
 export WINEDLLPATH="${prefix}${WINEDLLPATH:+:${WINEDLLPATH}}"
 wine regsvr32 pipeasio64.dll
 code=$?
+
+if [ ${code} -eq 0 ] \
+   && [ -e "${prefix}/i386-windows/pipeasio32.dll" ] \
+   && [ -e "${prefix}/x86_64-windows/pipeasio64-helper.exe" ]; then
+    >&2 echo "[${me}] registering experimental WoW64 32-bit front end"
+    cp -v --no-preserve=mode "${prefix}/i386-windows/pipeasio32.dll" \
+                             "${WINEPREFIX}/drive_c/windows/syswow64/" || exit $?
+    cp -v --no-preserve=mode "${prefix}/x86_64-windows/pipeasio64-helper.exe" \
+                             "${WINEPREFIX}/drive_c/windows/system32/" || exit $?
+    # Some Wine builds do not expose sysnative to 32-bit processes; keep a
+    # second copy where the 32-bit bridge can still launch it explicitly.
+    cp -v --no-preserve=mode "${prefix}/x86_64-windows/pipeasio64-helper.exe" \
+                             "${WINEPREFIX}/drive_c/windows/syswow64/" || exit $?
+
+    wine reg add \
+        'HKCR\CLSID\{2D3CA9E2-1193-4C5D-B5FD-38798F3DC074}\InprocServer32' \
+        /ve /t REG_SZ /d 'C:\windows\syswow64\pipeasio32.dll' /f /reg:32 || exit $?
+    wine reg add \
+        'HKCR\CLSID\{2D3CA9E2-1193-4C5D-B5FD-38798F3DC074}\InprocServer32' \
+        /v ThreadingModel /t REG_SZ /d Apartment /f /reg:32 || exit $?
+    wine reg add \
+        'HKLM\Software\ASIO\PipeASIO' \
+        /v CLSID /t REG_SZ /d '{2D3CA9E2-1193-4C5D-B5FD-38798F3DC074}' /f /reg:32 || exit $?
+    wine reg add \
+        'HKLM\Software\ASIO\PipeASIO' \
+        /v Description /t REG_SZ /d 'PipeASIO Driver' /f /reg:32 || exit $?
+fi
 
 if [ ${code} -eq 0 ]; then
     >&2 echo "[${me}] registered in ${WINEPREFIX}"

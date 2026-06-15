@@ -14,6 +14,7 @@
 # Env knobs:
 #   PROBE_PREFIX   : wineprefix (default $HOME/.cache/pipeasio-probe)
 #   PIPEASIO_ROOT  : install root for the .so (default $HOME/.local)
+#   ASIO_LOOPBACK_EXE : analyzer binary (default built 64-bit Wine PE)
 #   SIZES          : space-separated ASIO buffer sizes (default "0" = preferred)
 #   RATES          : space-separated forced rates, 0 = follow graph (default "0")
 #   SWEEP=1        : SIZES="128 256 512 1024", RATES="0 44100 96000"
@@ -23,7 +24,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-probe="${here}/asio_loopback.exe.so"
+probe="${ASIO_LOOPBACK_EXE:-${here}/asio_loopback.exe.so}"
 [[ -x "$probe" ]] || { echo "asio_loopback not built: $probe"; exit 1; }
 
 seconds="${1:-6}"
@@ -39,6 +40,45 @@ fi
 
 node="pipeasio-loopback"
 sink="pipeasio-loop-sink"
+
+resolve_port() {
+    local list="$1" preferred_node="$2" port="$3" resolved
+
+    resolved="$(
+        printf '%s\n' "$list" | awk -v preferred="${preferred_node}:${port}" '$0 == preferred { print; exit }'
+    )"
+    if [[ -n "$resolved" ]]; then
+        printf '%s\n' "$resolved"
+        return
+    fi
+
+    resolved="$(
+        printf '%s\n' "$list" | awk -v port=":${port}" '
+            index($0, port) == length($0) - length(port) + 1 && tolower($0) ~ /pipeasio/ {
+                print
+                exit
+            }
+        '
+    )"
+    if [[ -n "$resolved" ]]; then
+        printf '%s\n' "$resolved"
+        return
+    fi
+
+    printf '%s\n' "$list" | awk -v port=":${port}" '
+        index($0, port) == length($0) - length(port) + 1 {
+            print
+            exit
+        }
+    '
+}
+
+dump_ports() {
+    echo "[loop] available PipeWire output ports:"
+    pw-link -o 2>/dev/null | sed 's/^/[loop]   /' || true
+    echo "[loop] available PipeWire input ports:"
+    pw-link -i 2>/dev/null | sed 's/^/[loop]   /' || true
+}
 
 # --- preconditions ----------------------------------------------------------
 for tool in pw-cli pw-link wine; do
@@ -64,6 +104,12 @@ if ! wine reg query 'HKLM\Software\ASIO\PipeASIO' >/dev/null 2>&1; then
     echo "[loop] registering PipeASIO in $PROBE_PREFIX"
     "${PIPEASIO_ROOT}/bin/pipeasio-register" \
         || { echo "[loop] pipeasio-register failed"; exit 1; }
+fi
+
+probe_cmd=(wine "$probe")
+if [[ "$probe" == *.exe && "$probe" != *.exe.so ]]; then
+    probe_win="$(winepath -w "$probe")"
+    probe_cmd=(wine cmd /c "$probe_win")
 fi
 
 # Hermetic config: env overrides shield the run from the user's
@@ -95,10 +141,21 @@ sink_pid=$!
 # re-created, so just keep trying; pw-link is idempotent ("File exists").
 (
     while :; do
-        pw-link "$node:out_1" "$sink:playback_FL" 2>/dev/null || true
-        pw-link "$node:out_2" "$sink:playback_FR" 2>/dev/null || true
-        pw-link "$sink:monitor_FL" "$node:in_1"   2>/dev/null || true
-        pw-link "$sink:monitor_FR" "$node:in_2"   2>/dev/null || true
+        outputs="$(pw-link -o 2>/dev/null || true)"
+        inputs="$(pw-link -i 2>/dev/null || true)"
+        out_1="$(resolve_port "$outputs" "$node" out_1)"
+        out_2="$(resolve_port "$outputs" "$node" out_2)"
+        mon_l="$(resolve_port "$outputs" "$sink" monitor_FL)"
+        mon_r="$(resolve_port "$outputs" "$sink" monitor_FR)"
+        in_1="$(resolve_port "$inputs" "$node" in_1)"
+        in_2="$(resolve_port "$inputs" "$node" in_2)"
+        play_l="$(resolve_port "$inputs" "$sink" playback_FL)"
+        play_r="$(resolve_port "$inputs" "$sink" playback_FR)"
+
+        [[ -n "$out_1" && -n "$play_l" ]] && pw-link "$out_1" "$play_l" 2>/dev/null || true
+        [[ -n "$out_2" && -n "$play_r" ]] && pw-link "$out_2" "$play_r" 2>/dev/null || true
+        [[ -n "$mon_l" && -n "$in_1" ]] && pw-link "$mon_l" "$in_1" 2>/dev/null || true
+        [[ -n "$mon_r" && -n "$in_2" ]] && pw-link "$mon_r" "$in_2" 2>/dev/null || true
         sleep 0.25
     done
 ) &
@@ -110,8 +167,9 @@ for rate in $RATES; do
     export PIPEASIO_SAMPLE_RATE="$rate"
     echo "[loop] === rate=$rate (0 = follow graph), sizes: $SIZES ==="
     # shellcheck disable=SC2086
-    if ! wine "$probe" "$seconds" $SIZES; then
+    if ! "${probe_cmd[@]}" "$seconds" $SIZES; then
         overall=2
+        dump_ports
     fi
 done
 

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+pipeasio32="@PIPEASIO32_DLL@"
+helper64="@PIPEASIO64_HELPER@"
+file_cmd="@FILE_EXECUTABLE@"
+objdump32="@I686_W64_MINGW_OBJDUMP@"
+objdump64="@X86_64_W64_MINGW_OBJDUMP@"
+
+fail() {
+    printf 'not ok - %s\n' "$*" >&2
+    exit 1
+}
+
+[ -f "$pipeasio32" ] || fail "missing pipeasio32.dll at $pipeasio32"
+[ -f "$helper64" ] || fail "missing pipeasio64-helper.exe at $helper64"
+
+"$file_cmd" "$pipeasio32" | tee pipeasio32.file
+"$file_cmd" "$helper64" | tee pipeasio64-helper.file
+
+grep -q 'PE32 executable' pipeasio32.file \
+    || fail "pipeasio32.dll is not a PE32 artifact"
+grep -q 'Intel i386' pipeasio32.file \
+    || fail "pipeasio32.dll is not i386"
+grep -q 'PE32+ executable' pipeasio64-helper.file \
+    || fail "pipeasio64-helper.exe is not a PE32+ artifact"
+grep -q 'x86-64' pipeasio64-helper.file \
+    || fail "pipeasio64-helper.exe is not x86-64"
+
+"$objdump32" -p "$pipeasio32" > pipeasio32.objdump
+"$objdump64" -p "$helper64" > pipeasio64-helper.objdump
+
+for export in \
+    DllCanUnloadNow \
+    DllGetClassObject \
+    DllRegisterServer \
+    DllUnregisterServer
+do
+    grep -Eq "[[:space:]]${export}$" pipeasio32.objdump \
+        || fail "pipeasio32.dll missing undecorated export ${export}"
+done
+
+for forbidden in pipewire jack asound
+do
+    if grep -Eiq "$forbidden" pipeasio32.objdump pipeasio64-helper.objdump; then
+        fail "WoW64 PE artifacts unexpectedly reference ${forbidden}"
+    fi
+done
+
+printf 'ok - WoW64 artifact contract holds\n'
