@@ -1,10 +1,15 @@
 #!/bin/bash
 me=pipeasio-register
 
+# Wine binary to drive registration. Defaults to the ambient `wine` on PATH;
+# steam-pipeasio-run sets WINE to a bundled wine for Steam hosts that have none.
+wine_bin="${WINE:-wine}"
+
 WINEPREFIX=${WINEPREFIX:=~/.wine}
 
-if [ ! -d "${WINEPREFIX}" ]; then
-    wineboot -u || exit $?
+# Stage-only mode just refreshes the DLLs (no Wine), so skip the prefix boot.
+if [ -z "${PIPEASIO_STAGE_ONLY:-}" ] && [ ! -d "${WINEPREFIX}" ]; then
+    "${wine_bin}" wineboot -u || exit $?
 fi
 
 # Candidate Wine "prefix" roots where both halves of PipeASIO may live:
@@ -53,37 +58,58 @@ mkdir -p "${WINEPREFIX}/drive_c/windows/system32" \
 cp -v --no-preserve=mode "${prefix}/x86_64-windows/pipeasio64.dll" \
                          "${WINEPREFIX}/drive_c/windows/system32/" || exit $?
 
+# Stage the optional WoW64 32-bit thunk PE too, so a DLL-only refresh keeps it
+# current without touching the registry. Gate on both halves being installed.
+have_thunk=
+if [ -e "${prefix}/i386-windows/pipeasio32.dll" ] \
+   && [ -e "${prefix}/x86_64-unix/pipeasio32.so" ]; then
+    have_thunk=1
+    cp -v --no-preserve=mode "${prefix}/i386-windows/pipeasio32.dll" \
+                             "${WINEPREFIX}/drive_c/windows/syswow64/" || exit $?
+fi
+
+# PIPEASIO_STAGE_ONLY: copy the DLLs and stop. The CLSID/ASIO/DllOverride entries
+# are version independent (InprocServer32 is a name, not a path), so they only
+# need writing once -- a foreign Wine touching the prefix triggers a slow rebuild,
+# which the caller avoids by re-running in this mode after the first registration.
+if [ -n "${PIPEASIO_STAGE_ONLY:-}" ]; then
+    >&2 echo "[${me}] refreshed PipeASIO DLLs in ${WINEPREFIX} (registration skipped)"
+    exit 0
+fi
+
 # WINEDLLPATH lets Wine (host wine for this registration; Proton's wine at
 # runtime — both need it for user-local installs) find the ELF .so half
 # next to its PE companion. Prepend, don't replace.
 export WINEDLLPATH="${prefix}${WINEDLLPATH:+:${WINEDLLPATH}}"
-wine regsvr32 pipeasio64.dll
+# PIPEASIO_SILENT suppresses regsvr32's success/failure message box (for
+# unattended Steam/Proton launches). The reg writes below are non-interactive.
+if [ -n "${PIPEASIO_SILENT:-}" ]; then
+    "${wine_bin}" regsvr32 /s pipeasio64.dll
+else
+    "${wine_bin}" regsvr32 pipeasio64.dll
+fi
 code=$?
 
-if [ ${code} -eq 0 ] \
-   && [ -e "${prefix}/i386-windows/pipeasio32.dll" ] \
-   && [ -e "${prefix}/x86_64-unix/pipeasio32.so" ]; then
+if [ ${code} -eq 0 ] && [ -n "${have_thunk}" ]; then
     >&2 echo "[${me}] registering experimental WoW64 32-bit thunk"
-    cp -v --no-preserve=mode "${prefix}/i386-windows/pipeasio32.dll" \
-                            "${WINEPREFIX}/drive_c/windows/syswow64/" || exit $?
     # Point COM at the builtin module name. The syswow64 PE32 stub is marked as a
     # Wine builtin and the override below forces Wine to resolve the real
     # module through WINEDLLPATH, where the sibling x86_64-unix/pipeasio32.so
     # unixlib lives. A Z:\... module-tree path maps as a plain PE file and
     # __wine_init_unix_call() cannot find the native unixlib half.
-    wine reg add \
+    "${wine_bin}" reg add \
         'HKCR\CLSID\{2D3CA9E2-1193-4C5D-B5FD-38798F3DC074}\InprocServer32' \
         /ve /t REG_SZ /d 'pipeasio32.dll' /f /reg:32 || exit $?
-    wine reg add \
+    "${wine_bin}" reg add \
         'HKCR\CLSID\{2D3CA9E2-1193-4C5D-B5FD-38798F3DC074}\InprocServer32' \
         /v ThreadingModel /t REG_SZ /d Apartment /f /reg:32 || exit $?
-    wine reg add \
+    "${wine_bin}" reg add \
         'HKCU\Software\Wine\DllOverrides' \
         /v pipeasio32 /t REG_SZ /d builtin /f /reg:32 || exit $?
-    wine reg add \
+    "${wine_bin}" reg add \
         'HKLM\Software\ASIO\PipeASIO' \
         /v CLSID /t REG_SZ /d '{2D3CA9E2-1193-4C5D-B5FD-38798F3DC074}' /f /reg:32 || exit $?
-    wine reg add \
+    "${wine_bin}" reg add \
         'HKLM\Software\ASIO\PipeASIO' \
         /v Description /t REG_SZ /d 'PipeASIO Driver' /f /reg:32 || exit $?
 fi

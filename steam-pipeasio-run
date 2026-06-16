@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# steam-pipeasio-run: install PipeASIO into a Steam/Proton title's Wine prefix,
+# then launch the game. Use it as the title's Steam launch option:
+#
+#     steam-pipeasio-run %command%
+#
+# Required environment:
+#   PIPEASIO_PREFIX         Install prefix that holds lib/wine/<arch>/pipeasio*.
+#                           The Nix package sets this by default.
+#   STEAM_COMPAT_DATA_PATH  Exported by Steam for the launched title. Its "pfx"
+#                           subdirectory is the title's Wine prefix.
+#
+# Optional environment:
+#   PIPEASIO_RUN_DEBUG=1    Trace every step (set -x) and capture the whole
+#                           session, plus the driver's own logs, to a file in
+#                           the home directory.
+
+set -euo pipefail
+
+me=steam-pipeasio-run
+
+log() { printf '[%s] %s\n' "${me}" "$*" >&2; }
+die() { log "error: $*"; exit 1; }
+
+# Debug mode runs first so the checks below are captured too: send the whole
+# session (this script, the registration step, and the launched game) into one
+# logfile under the home directory and trace each command.
+if [ -n "${PIPEASIO_RUN_DEBUG:-}" ]; then
+    run_log="${HOME:-/tmp}/pipeasio-steam-run${SteamAppId:+.${SteamAppId}}.log"
+    exec >>"${run_log}" 2>&1
+    export PS4='+ ${BASH_SOURCE##*/}:${LINENO}: '
+    set -x
+    log "debug session log: ${run_log}"
+    # Surface the driver's own diagnostics in the same log during the run.
+    export PIPEASIO_DEBUG=1
+fi
+
+# A PipeASIO install path is mandatory.
+[ -n "${PIPEASIO_PREFIX:-}" ] \
+    || die "PIPEASIO_PREFIX is unset. Point it at the PipeASIO install prefix (the directory that contains lib/wine)."
+[ -d "${PIPEASIO_PREFIX}" ] \
+    || die "PIPEASIO_PREFIX=${PIPEASIO_PREFIX} is not a directory."
+
+# The Wine prefix comes from the Steam session. STEAM_COMPAT_DATA_PATH is set by
+# Steam only when a title is launched through a compatibility tool (Proton).
+[ -n "${STEAM_COMPAT_DATA_PATH:-}" ] \
+    || die "STEAM_COMPAT_DATA_PATH is unset. Run this as a Steam launch command, e.g. 'steam-pipeasio-run %command%'."
+WINEPREFIX="${STEAM_COMPAT_DATA_PATH%/}/pfx"
+[ -d "${WINEPREFIX}" ] \
+    || die "Wine prefix not found at ${WINEPREFIX}. Launch the title once without this wrapper so Steam creates the prefix, then re-enable it."
+export WINEPREFIX
+
+# Need a game command to hand back to Steam.
+[ "$#" -gt 0 ] \
+    || die "no game command supplied. Use 'steam-pipeasio-run %command%' in the Steam launch options."
+
+# Locate pipeasio-register next to this script first, then fall back to PATH.
+self_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)" || self_dir=""
+register="${self_dir}/pipeasio-register"
+if [ ! -x "${register}" ]; then
+    register="$(command -v pipeasio-register 2>/dev/null || true)"
+fi
+[ -n "${register}" ] && [ -x "${register}" ] \
+    || die "pipeasio-register not found next to ${me} or on PATH."
+
+# Register PipeASIO.
+stamp="${WINEPREFIX}/.pipeasio-registered"
+have_thunk=no
+if [ -e "${PIPEASIO_PREFIX%/}/lib/wine/i386-windows/pipeasio32.dll" ] \
+   && [ -e "${PIPEASIO_PREFIX%/}/lib/wine/x86_64-unix/pipeasio32.so" ]; then
+    have_thunk=yes
+fi
+ident="reg-v1|thunk=${have_thunk}"
+
+if [ -n "${PIPEASIO_SKIP_REGISTER:-}" ]; then
+    log "PIPEASIO_SKIP_REGISTER set; leaving ${WINEPREFIX} untouched"
+elif [ "${PIPEASIO_FORCE_REGISTER:-}" != "1" ] \
+     && [ -f "${stamp}" ] \
+     && [ "$(cat "${stamp}" 2>/dev/null || true)" = "${ident}" ]; then
+    # Already registered: only refresh the DLL files (no Wine, no prefix rebuild).
+    log "refreshing PipeASIO DLLs in ${WINEPREFIX} (already registered)"
+    PIPEASIO_PREFIX="${PIPEASIO_PREFIX}" WINEPREFIX="${WINEPREFIX}" PIPEASIO_STAGE_ONLY=1 \
+        "${register}" || log "warning: DLL refresh failed (status $?); continuing"
+else
+    # First run (or forced): full registration.
+    log "installing PipeASIO into ${WINEPREFIX} (first run may show a one-time Wine prefix update)"
+    if PIPEASIO_PREFIX="${PIPEASIO_PREFIX}" \
+       WINEPREFIX="${WINEPREFIX}" \
+       PIPEASIO_SILENT=1 \
+       WINEDLLOVERRIDES="mscoree=d;mshtml=d${WINEDLLOVERRIDES:+;${WINEDLLOVERRIDES}}" \
+       "${register}"; then
+        printf '%s\n' "${ident}" > "${stamp}" 2>/dev/null || true
+        log "PipeASIO registered in ${WINEPREFIX}"
+    else
+        rc=$?
+        log "warning: PipeASIO registration failed (status ${rc}); launching the game without it"
+    fi
+fi
+
+# Proton's own Wine runs the game and needs WINEDLLPATH to find the ELF unixlib
+# halves next to their PE companions at load time. Prepend, do not replace.
+export WINEDLLPATH="${PIPEASIO_PREFIX%/}/lib/wine${WINEDLLPATH:+:${WINEDLLPATH}}"
+
+log "launching game: $*"
+exec "$@"

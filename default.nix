@@ -1,16 +1,16 @@
-{
-  lib,
-  stdenv,
-  bash,
-  cmake,
-  file,
-  makeWrapper,
-  ninja,
-  pipewire,
-  pkg-config,
-  pkgsCross,
-  qt6,
-  wineWow64Packages,
+{ lib
+, stdenv
+, bash
+, cmake
+, file
+, makeWrapper
+, ninja
+, pipewire
+, pkg-config
+, pkgsCross
+, qt6
+, wineWow64Packages
+,
 }:
 
 let
@@ -30,6 +30,7 @@ let
     "README.md"
     "pipeasio-register"
     "pipeasio.dll.spec"
+    "steam-pipeasio-run"
   ];
 in
 stdenv.mkDerivation (finalAttrs: {
@@ -80,6 +81,9 @@ stdenv.mkDerivation (finalAttrs: {
     wrapQtApp "$out/bin/pipeasio-settings"
     wrapProgram "$out/bin/pipeasio-register" \
       --set-default PIPEASIO_PREFIX "$out"
+    wrapProgram "$out/bin/steam-pipeasio-run" \
+      --set-default PIPEASIO_PREFIX "$out" \
+      --set-default WINE "${wine}/bin/wine"
   '';
 
   meta = {

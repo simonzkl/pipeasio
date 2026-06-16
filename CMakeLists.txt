@@ -168,6 +168,7 @@ if(BUILD_WOW64_32)
 endif()
 
 install(PROGRAMS ${CMAKE_SOURCE_DIR}/pipeasio-register
+                 ${CMAKE_SOURCE_DIR}/steam-pipeasio-run
         DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Native Qt6 settings panel (pipeasio-settings), run from the user's Linux host
